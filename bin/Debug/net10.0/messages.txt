@@ -1,8 +1,5 @@
 2025-12-14 18:11:12 | Merhaba Sunucu, bu bir test mesajıdır
 
-
-2025-12-14 18:19:21 | YAVUUUUUUUZ12
-
 Birinci mesaj
 
 İkinci mesaj
@@ -12,8 +9,6 @@ Birinci mesaj
 Üçüncü mesaj
 
 İkinci mesaj
-
-Selam Burakçım
 
 Başardık 
 
