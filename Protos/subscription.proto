@@ -1,0 +1,18 @@
+﻿syntax = "proto3";
+option csharp_namespace = "GrpcService1";
+
+package subscription;
+
+service Subscription {
+  rpc Subscribe (SubscribeRequest) returns (SubscribeResponse);
+}
+
+
+
+message SubscribeRequest {
+  int32 port = 1;
+}
+
+message SubscribeResponse {
+  string message = 1;
+}
