@@ -6,11 +6,11 @@ class LeaderClient:
     def __init__(self, host="127.0.0.1", port=6666):
         self.host = host
         self.port = port
-        self.used_ids = set()  # önceden kullandığımız id'leri kaydetmek için
+        self.used_ids = set()  
     def send_command(self, command: str):
         command = command.strip()
 
-        # SET ID çakışması olduğunda sunucuya göndermez
+        
         if command.upper().startswith("SET "):
             try: 
                 parts = command.split(" ", 2)
@@ -55,7 +55,6 @@ def interactive_mode(client: LeaderClient):
             break
         client.send_command(cmd)
 
-# test için başlangıç ID'sini manuel gireceğiz
 def load_test_set(client: LeaderClient):
     start_id = int(input("Başlangıç message_id girin (örn: 1): "))
     n = int(input("Kaç adet SET gönderilsin?: "))
