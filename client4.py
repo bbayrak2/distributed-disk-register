@@ -1,12 +1,15 @@
 import socket
 import time
+from pathlib import Path
 
 
+ana_dizin = Path(__file__).resolve().parent
+kayıt_yolu = ana_dizin /"distributed-disk-register-furkan2"/"Records"
 class LeaderClient:
     def __init__(self, host="127.0.0.1", port=6666):
         self.host = host
         self.port = port
-        self.path1 = # records path 
+        self.path1 = kayıt_yolu
         if self.path1:
             ıd_tespit(self.path1) 
         self.used_ids = set(ıdler) 
@@ -55,6 +58,18 @@ def interactive_mode(client: LeaderClient):
 
     while True:
         cmd = input("> ").strip()
+        parts = cmd.split()
+        if len(parts) == 0:
+            continue
+        sorgu= int(parts[1])
+
+        if parts[0]=="GET":
+            if sorgu in client.used_ids:
+                pass
+            else:
+                print("lütfen geçerli bir ıd giriniz")
+                continue 
+
         if cmd.lower() == "exit":
             break
         client.send_command(cmd)
@@ -74,6 +89,7 @@ def load_test_set(client: LeaderClient):
     for i in range(1, n + 1):
         client.send_command(f"SET {current_id} mesaj_{current_id}")
         current_id+=1
+        time.sleep(0.003)
     print(f"{n} adet SET gönderildi.")
 sırala=[]
 ıdler=[]
@@ -83,21 +99,19 @@ def max_ıd(yol):
     if sırala:
         print(f"mevcut max ıd {max(sırala)}  \ndaha buyuk bir id giriniz")
 def ıd_tespit(yol):
-            from pathlib import Path
-            ana_yol = Path(yol)
-
-
-            if not ana_yol.exists():
-                print("Yol bulunamadı.")
-                return
-            for klasor in ana_yol.iterdir():
-                if klasor.is_dir():
-                    ıd_tespit(klasor.resolve())
-                else:
-                    if klasor.is_file():
-                            sıra =int(klasor.stem)
-                            sırala.append(sıra)
-                            ıdler.append(sıra)
+ 
+    ana_yol = Path(yol)
+    if not ana_yol.exists():
+        print("Yol bulunamadı.")
+        return
+    for klasor in ana_yol.iterdir():
+        if klasor.is_dir():
+            ıd_tespit(klasor.resolve())
+        else:
+            if klasor.is_file():
+                    sıra =int(klasor.stem)
+                    sırala.append(sıra)
+                    ıdler.append(sıra)
 
 
 def mesaj_sayisi_pathlib(yol):
