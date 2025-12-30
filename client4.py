@@ -5,6 +5,8 @@ from pathlib import Path
 
 ana_dizin = Path(__file__).resolve().parent
 kayıt_yolu = ana_dizin /"distributed-disk-register-furkan2"/"Records"
+sırala=[]
+
 class LeaderClient:
     def __init__(self, host="127.0.0.1", port=6666):
         self.host = host
@@ -12,7 +14,7 @@ class LeaderClient:
         self.path1 = kayıt_yolu
         if self.path1:
             ıd_tespit(self.path1) 
-        self.used_ids = set(ıdler) 
+        self.used_ids = set(sırala) 
         
     def send_command(self, command: str):
         command = command.strip()
@@ -91,8 +93,7 @@ def load_test_set(client: LeaderClient):
         current_id+=1
         time.sleep(0.003)
     print(f"{n} adet SET gönderildi.")
-sırala=[]
-ıdler=[]
+
 
 def max_ıd(yol):
     ıd_tespit(yol)
@@ -111,7 +112,7 @@ def ıd_tespit(yol):
             if klasor.is_file():
                     sıra =int(klasor.stem)
                     sırala.append(sıra)
-                    ıdler.append(sıra)
+                    
 
 
 def mesaj_sayisi_pathlib(yol):
@@ -139,6 +140,7 @@ if __name__ == "__main__":
 
     print("1 - Manuel SET / GET")
     print("2 - Otomatik SET yük testi")
+    print("3 - Mesaj Verisi ")
 
     choice = input("Seçim: ")
 
@@ -146,5 +148,7 @@ if __name__ == "__main__":
         interactive_mode(client)
     elif choice == "2":
         load_test_set(client)
+    elif choice == "3":
+        mesaj_sayisi_pathlib(client.path1)
     else:
         print("Geçersiz seçim")
