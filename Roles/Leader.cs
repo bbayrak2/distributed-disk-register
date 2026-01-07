@@ -5,8 +5,6 @@ using System.Threading.Channels;
 using Grpc.Core;
 using Grpc.Net.Client;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
-using System.Text.Json;
-using System.IO;
 using GrpcService.Services;
 
 namespace GrpcService.Roles;
@@ -15,21 +13,19 @@ public class Leader(int backUp) : IServer
 {
     private const int Port = 5555;
     private readonly Channel<TcpRequest> _channel = Channel.CreateUnbounded<TcpRequest>();
-    private MemberRegistry _registry = new();
+    private readonly MemberRegistry _registry = new();
     private readonly Dictionary<int, Family.FamilyClient> _familyClients = new();
     private readonly Dictionary<int, Chat.ChatClient> _chatClients = new();
-    private readonly HashSet<int> _availablePorts = new();
-    private readonly object _lock = new();
+    private readonly Lock _lock = new();
     private readonly Dictionary<int, MemberInfo> _members = new();
-    private string _membersFilePath = "members.json";
-    private Dictionary<int, List<int>> _diskMap = [];
+    private readonly Dictionary<int, List<int>> _diskMap = [];
 
-
-// Public property so other parts of your app can read the list safely
-    public List<int> AvailablePorts 
+    private readonly HashSet<int> _availablePorts = [];
+    private HashSet<int> AvailablePorts 
     {
-        get { lock(_lock) return _availablePorts.ToList(); }
+        get { lock(_lock) return [.._availablePorts]; }
     }
+    
     
 
     public async Task Run()
@@ -109,16 +105,13 @@ public class Leader(int backUp) : IServer
     
     private async Task HandleGetRequest(TcpClient client, int id)
     {
-        await using var stream = client.GetStream();
-        string? response;
-        byte[]? responseBytes;
+        var stream = client.GetStream();
+        string response;
         if (!_diskMap.ContainsKey(id))
         {
             response = $"ERROR, {id} message is unreachable";
-            responseBytes = Encoding.UTF8.GetBytes(response);
-            await stream.WriteAsync(responseBytes, 0, responseBytes.Length);
-            client.Close();
-            throw new Exception("Message is unreachable");
+            await SendResponseAsync(stream,response);
+            return;
         }
         var ports = _diskMap[id];
         
@@ -135,9 +128,7 @@ public class Leader(int backUp) : IServer
                 };
                 var text = _chatClients[port].GetMessage(request).Text;
                 response = $"OK, {id} {text}";
-                responseBytes = Encoding.UTF8.GetBytes(response);
-                await stream.WriteAsync(responseBytes, 0, responseBytes.Length);
-                client.Close();
+                await SendResponseAsync(stream, response);
                 return;
             }
             catch(Exception ex)
@@ -147,10 +138,7 @@ public class Leader(int backUp) : IServer
         }
 
         response = $"ERROR, {id}";
-        responseBytes = Encoding.UTF8.GetBytes(response);
-        await stream.WriteAsync(responseBytes, 0, responseBytes.Length);
-        client.Close();
-        throw new Exception("Message is unreachable");
+        await SendResponseAsync(stream, response);
     }
 
 
@@ -158,24 +146,21 @@ public class Leader(int backUp) : IServer
     {
         await using var stream = client.GetStream();
         string response;
-        byte[] responseBytes;
         if (_diskMap.ContainsKey(id))
         {
             response = $"ERROR, {id} There is a message with same id";
-            responseBytes = Encoding.UTF8.GetBytes(response);
-            await stream.WriteAsync(responseBytes, 0, responseBytes.Length);
-            client.Close();
-            throw new Exception("Message is unreachable");
+            await SendResponseAsync(stream, response);
+            return;
         }
         var backUpCounter = 0;
-        var orderedPortList = _members
-            .Where(kv => kv.Value.Connected)
-            .OrderBy(kv => kv.Value.MessageNumber)
-            .Select(kv => kv.Key)
-            .ToList();
-        
+        List<int> orderedPortList;
         lock(_lock) {
-            _diskMap[id] = new List<int>();
+            orderedPortList = _members
+                .Where(kv => kv.Value.Connected)
+                .OrderBy(kv => kv.Value.MessageNumber)
+                .Select(kv => kv.Key)
+                .ToList();
+            _diskMap[id] = [];
         }
 
         foreach (var port in orderedPortList.TakeWhile(port => backUpCounter != backUp))
@@ -188,7 +173,7 @@ public class Leader(int backUp) : IServer
             
             try
             {
-                var grpcResponse = _chatClients[port].SetMessage(new SetRequest
+                _chatClients[port].SetMessage(new SetRequest
                 {
                     Id = id,
                     Text = text,
@@ -207,11 +192,14 @@ public class Leader(int backUp) : IServer
         }
 
         response = backUpCounter >= backUpNumber ? "OK" : "ERROR: Not enough backups";
-        responseBytes = Encoding.UTF8.GetBytes(response);
-        await stream.WriteAsync(responseBytes, 0, responseBytes.Length);
-    
+        await SendResponseAsync(stream, response);
     }
 
+    private static async Task SendResponseAsync(NetworkStream stream, string message)
+    {
+        var responseBytes = Encoding.UTF8.GetBytes(message);
+        await stream.WriteAsync(responseBytes);
+    }
     private async Task CheckFamily()
     {
         using var timer = new PeriodicTimer(TimeSpan.FromSeconds(5));
@@ -229,7 +217,11 @@ public class Leader(int backUp) : IServer
             {
                 if (!_members.ContainsKey(port))
                 {
-                    _members.Add(port,new MemberInfo(0,false));
+                    lock(_lock)
+                    {
+                        if (!_members.ContainsKey(port))
+                            _members.Add(port, new MemberInfo(0, false));
+                    }
                 }
                 try
                 {
@@ -249,36 +241,42 @@ public class Leader(int backUp) : IServer
 
 
                     if (!reply.Active) continue;
-                    lock(_lock) _availablePorts.Add(port);
+
+                    lock (_lock)
+                    {
+                        _availablePorts.Add(port);
+                        
+                    }
                 }
                 catch (RpcException)
                 {
-                    lock(_lock)
+                    lock (_lock)
                     {
-                        if (_availablePorts.Remove(port))
-                            Console.WriteLine($"Port {port} removed (unreachable).");
+                        _availablePorts.Remove(port);
                     }
+                    Console.WriteLine($"Port {port} removed (unreachable).");
+                
                 }
 
             }
 
             foreach (var member in _members)
             {
-                member.Value.Connected = _availablePorts.Contains(member.Key);
+                member.Value.Connected = AvailablePorts.Contains(member.Key);
             }
 
             
             
-            if (_availablePorts.Count == 0)
+            if (AvailablePorts.Count == 0)
             {
                 Console.WriteLine("Empty");
                 continue;
             }
             
-            foreach (var port in _availablePorts)
+            foreach (var port in AvailablePorts)
             {
                 _members[port].Connected = true;
-                _familyClients[port].SendFamily(new FamilyMembers{Ports = { _availablePorts }});
+                _familyClients[port].SendFamily(new FamilyMembers{Ports = { AvailablePorts }});
             }
             
             Console.WriteLine($"Message number: {_diskMap.Keys.Count}");
