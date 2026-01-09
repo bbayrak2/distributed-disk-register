@@ -105,16 +105,19 @@ public class Leader(int backUp) : IServer
     
     private async Task HandleGetRequest(TcpClient client, int id)
     {
-        var stream = client.GetStream();
+    Console.WriteLine($"[DEBUG] İstek ID: {id}. Map'teki toplam kayıt: {_diskMap.Count}");
+    var stream = client.GetStream();
         string response;
+
         if (!_diskMap.ContainsKey(id))
         {
-            response = $"ERROR, {id} message is unreachable";
-            await SendResponseAsync(stream,response);
+            response = $"ERROR, {id} message is unreachable\n"; 
+            await SendResponseAsync(stream, response);
             return;
         }
+
         var ports = _diskMap[id];
-        
+        bool dataFound = false;
         foreach (var port in ports)
         {
             try
@@ -126,21 +129,28 @@ public class Leader(int backUp) : IServer
                     FromPort = Port,
                     Timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds()
                 };
-                var text = _chatClients[port].GetMessage(request).Text;
-                response = $"OK, {id} {text}";
+
+                var rpcResponse = await _chatClients[port].GetMessageAsync(request); 
+                var text = rpcResponse.Text;
+
+                response = $"{id} {text} OK\n"; 
                 await SendResponseAsync(stream, response);
-                return;
+
+                dataFound = true;
+                return; 
             }
-            catch(Exception ex)
+            catch (Exception ex)
             {
-                Console.WriteLine($"GET Error on port:{port}");
+                Console.WriteLine($"[Warning] GET Error on port {port} for ID {id}: {ex.Message}");
             }
         }
-
-        response = $"ERROR, {id}";
-        await SendResponseAsync(stream, response);
+        if (!dataFound)
+        {
+            Console.WriteLine($"[Error] Failed to retrieve ID {id} from all replicas: {string.Join(",", ports)}");
+            response = $"ERROR, {id} not found on any node\n";
+            await SendResponseAsync(stream, response);
+        }
     }
-
 
     private async Task HandleSetRequest(TcpClient client,int id, string text, int backUpNumber)
     {
@@ -192,7 +202,7 @@ public class Leader(int backUp) : IServer
         }
 
         response = backUpCounter >= backUpNumber ? "OK" : "ERROR: Not enough backups";
-        await SendResponseAsync(stream, response);
+        await SendResponseAsync(stream, response +"\n");
     }
 
     private static async Task SendResponseAsync(NetworkStream stream, string message)
