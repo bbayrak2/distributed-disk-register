@@ -1,59 +1,70 @@
 ﻿using Grpc.Core;
 using GrpcService.Roles;
-using Microsoft.Extensions.Primitives;
 
 namespace GrpcService.Services;
 
-public class ChatService(MemberConfig config) : Chat.ChatBase
+public class ChatService : Chat.ChatBase
 {
-    private readonly int _port = config.Port;
+    private int _port;
+    private string baseDirectory = Directory.GetParent(AppContext.BaseDirectory)!.Parent!.Parent!.Parent!.FullName;
+    private string path;
 
-    public override Task<SetResponse> SetMessage(SetRequest request, ServerCallContext context)
+    public ChatService(MemberConfig config)
+    {
+        _port =  config.Port;
+        path = Path.Combine(baseDirectory, "Records", _port.ToString());
+        Directory.CreateDirectory(path);
+    }
+    
+    public override async Task<SetResponse> SetMessage(SetRequest request, ServerCallContext context)
     {
         try
         {
-            var baseDirectory = Directory.GetParent(AppContext.BaseDirectory)!.Parent!.Parent!.Parent!.FullName;
-            var path = Path.Combine(baseDirectory, "Records", _port.ToString());
-            Directory.CreateDirectory(path);
-
-            path = Path.Combine(path, $"{request.Id.ToString()}.txt");
+            var filePath = Path.Combine(path, $"{request.Id}.txt");
             var lines = new[]
                 { request.Text, request.FromHost, request.FromPort.ToString(), request.Timestamp.ToString() };
-            File.WriteAllLines(path, lines);
-            return Task.FromResult(new SetResponse
+            
+            await File.WriteAllLinesAsync(filePath, lines);
+            
+            return new SetResponse
             {
                 Id = request.Id,
                 Text = request.Text,
                 Port = _port
-            });
+            };
         }
         catch (Exception ex)
         {
+            Console.WriteLine("Member cannot save the message : " );
             throw new RpcException(new Status(StatusCode.Cancelled,"Member cannot save the message"));
         }
-        
     }
     
-    
-    public override Task<GetResponse> GetMessage(GetRequest request, ServerCallContext context)
+    public override async Task<GetResponse> GetMessage(GetRequest request, ServerCallContext context)
     {
         try
         {
-            var baseDirectory = Directory.GetParent(AppContext.BaseDirectory)!.Parent!.Parent!.Parent!.FullName;
-            var fileName = request.Id.ToString() + ".txt";
-            var path = Path.Combine(baseDirectory, "Records", _port.ToString(),fileName);
-            var content = File.ReadAllText(path);
+            var fileName = request.Id + ".txt";
+            var filePath = Path.Combine(baseDirectory, "Records", _port.ToString(),fileName);
             
-            return Task.FromResult(new GetResponse
+            if (!File.Exists(filePath))
+            {
+                throw new RpcException(new Status(StatusCode.NotFound, $"Message {request.Id} not found"));
+            }
+            var lines = await File.ReadAllLinesAsync(filePath);
+            
+            var content = lines.Length > 0 ? lines[0] : string.Empty;
+            
+            return new GetResponse
             {
                 Id = request.Id,
                 Text = content
-            });
-
+            };
         }
         catch (Exception ex)
         {
-            throw ex;
+            Console.WriteLine("Member cannot reach the message");
+            throw; 
         }
     }
 }
