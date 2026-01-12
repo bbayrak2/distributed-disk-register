@@ -1,7 +1,7 @@
 ﻿using System.Net;
 using System.Net.Sockets;
 using System.Text;
-using System.Threading.Channels;
+using System.Collections.Concurrent;
 using Grpc.Core;
 using Grpc.Net.Client;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
@@ -12,28 +12,21 @@ namespace GrpcService.Roles;
 public class Leader(int backUp) : IServer
 {
     private const int Port = 5555;
-    private readonly Channel<TcpRequest> _channel = Channel.CreateUnbounded<TcpRequest>();
+    private const int TcpPort = 6666;
     private readonly MemberRegistry _registry = new();
-    private readonly Dictionary<int, Family.FamilyClient> _familyClients = new();
-    private readonly Dictionary<int, Chat.ChatClient> _chatClients = new();
-    private readonly Lock _lock = new();
-    private readonly Dictionary<int, MemberInfo> _members = new();
-    private readonly Dictionary<int, List<int>> _diskMap = [];
+    private readonly ConcurrentDictionary<int, Family.FamilyClient> _familyClients = new();
+    private readonly ConcurrentDictionary<int, Chat.ChatClient> _chatClients = new();
+    private readonly ConcurrentDictionary<int, MemberInfo> _members = new();
+    private readonly ConcurrentDictionary<int, List<int>> _diskMap = [];
+    private readonly ConcurrentDictionary<int, byte> _availablePorts = new();
 
-    private readonly HashSet<int> _availablePorts = [];
-    private HashSet<int> AvailablePorts 
-    {
-        get { lock(_lock) return [.._availablePorts]; }
-    }
-    
-    
+    private IEnumerable<int> AvailablePorts => _availablePorts.Keys;
 
     public async Task Run()
     {
         await Task.WhenAll(
             ListenClientsAsync(),
             ListenMemberAsync(),
-            ProcessChannelAsync(),
             CheckFamily()
         );
     }
@@ -41,7 +34,7 @@ public class Leader(int backUp) : IServer
     
     private async Task ListenClientsAsync()
     {
-        var listener = new TcpListener(IPAddress.Any, 6666);
+        var listener = new TcpListener(IPAddress.Any, TcpPort);
         listener.Start();
         while (true)
         {
@@ -51,20 +44,69 @@ public class Leader(int backUp) : IServer
     }
     private async Task HandleClientAsync(TcpClient client)
     {
-        await using var stream = client.GetStream();
-        using var reader = new StreamReader(stream, Encoding.UTF8);
-        while (await reader.ReadLineAsync() is { } msg)
+        try
         {
-            if (string.IsNullOrWhiteSpace(msg)) continue;
-            Console.WriteLine(msg);
-            await _channel.Writer.WriteAsync(new TcpRequest(client,msg));
+            await using var stream = client.GetStream();
+            using var reader = new StreamReader(stream, Encoding.UTF8);
+            using var writer = new StreamWriter(stream, Encoding.UTF8){AutoFlush = true};
+            
+            while (await reader.ReadLineAsync() is { } msg)
+            {
+                if (string.IsNullOrWhiteSpace(msg)) continue;
+                
+                
+                var parts = msg.Split(' ', 3);
+                if (parts.Length < 2)
+                {
+                    await writer.WriteLineAsync("ERROR Invalid Protocol");
+                    continue;
+                }
+
+                var cmd = parts[0].ToUpper();
+                if (!int.TryParse(parts[1], out var id))
+                {
+                    await writer.WriteLineAsync("ERROR Invalid ID Format");
+                    continue;
+                }
+                switch (cmd)
+                {
+                    case "GET":
+                        await HandleGetRequest(writer, id);
+                        break;
+                    
+                    case "SET":
+                        if (parts.Length < 3)
+                        {
+                            await writer.WriteLineAsync("ERROR Invalid Protocol");
+                        }
+                        else
+                        {
+                            await HandleSetRequest(writer, id, parts[2], backUp);
+                        }
+                        break;
+                    
+                    default:
+                        await writer.WriteLineAsync($"ERROR Unknown Command {cmd}");
+                        break;
+                }
+            }
+        }catch (Exception ex)
+        {
+            Console.WriteLine($"[Client Error] {ex.Message}");
+        }
+        finally
+        {
+            client.Close();
         }
     }
+
     private async Task ListenMemberAsync()  //gRPC
     {
         
         var builder = WebApplication.CreateBuilder();
         builder.Services.AddSingleton(_registry);
+        builder.Logging.ClearProviders();
+        
         builder.WebHost.ConfigureKestrel(options =>
         {
             options.ListenAnyIP(Port, listenOptions =>
@@ -81,43 +123,17 @@ public class Leader(int backUp) : IServer
         await app.RunAsync();
     }
 
-    private async Task ProcessChannelAsync()
-    {
-        
-        await foreach (var item in _channel.Reader.ReadAllAsync())
-        {
-            var text = item.Text;
-            var parts = text.Split(' ');
-            var id = Convert.ToInt32(parts[1]);
-            switch (parts[0])
-            {
-                case "GET":
-                    await HandleGetRequest(item.Client,id);
-                    break;
-                case "SET":
-                    await HandleSetRequest(item.Client,id,parts[2],backUp);
-                    break;
-            }
-            
-        }
-    }
     
     
-    private async Task HandleGetRequest(TcpClient client, int id)
+    
+    private async Task HandleGetRequest(StreamWriter writer, int id)
     {
-    Console.WriteLine($"[DEBUG] İstek ID: {id}. Map'teki toplam kayıt: {_diskMap.Count}");
-    var stream = client.GetStream();
-        string response;
-
-        if (!_diskMap.ContainsKey(id))
+        if (!_diskMap.TryGetValue(id, out var ports))
         {
-            response = $"ERROR, {id} message is unreachable\n"; 
-            await SendResponseAsync(stream, response);
+            await writer.WriteLineAsync($"ERROR, {id} message is unreachable\n");
             return;
         }
 
-        var ports = _diskMap[id];
-        bool dataFound = false;
         foreach (var port in ports)
         {
             try
@@ -129,61 +145,49 @@ public class Leader(int backUp) : IServer
                     FromPort = Port,
                     Timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds()
                 };
-
-                var rpcResponse = await _chatClients[port].GetMessageAsync(request); 
+                
+                var rpcResponse = await _chatClients[port].GetMessageAsync(request);
                 var text = rpcResponse.Text;
 
-                response = $"{id} {text} OK\n"; 
-                await SendResponseAsync(stream, response);
-
-                dataFound = true;
-                return; 
+                
+                await writer.WriteLineAsync($"OK, {id} {text} \n");
+                return;
             }
-            catch (Exception ex)
+            catch(Exception ex)
             {
                 Console.WriteLine($"[Warning] GET Error on port {port} for ID {id}: {ex.Message}");
             }
         }
-        if (!dataFound)
-        {
-            Console.WriteLine($"[Error] Failed to retrieve ID {id} from all replicas: {string.Join(",", ports)}");
-            response = $"ERROR, {id} not found on any node\n";
-            await SendResponseAsync(stream, response);
-        }
+        Console.WriteLine($"[Error] Failed to retrieve ID {id} from all replicas: {string.Join(",", ports)}");
+        await writer.WriteLineAsync($"ERROR Key {id} exists in map but missing on nodes");
+        
     }
 
-    private async Task HandleSetRequest(TcpClient client,int id, string text, int backUpNumber)
+
+    private async Task HandleSetRequest(StreamWriter writer,int id, string text, int backUpNumber)
     {
-        await using var stream = client.GetStream();
-        string response;
         if (_diskMap.ContainsKey(id))
         {
-            response = $"ERROR, {id} There is a message with same id";
-            await SendResponseAsync(stream, response);
+            await writer.WriteLineAsync($"ERROR, {id} There is a message with same id\n");
             return;
         }
         var backUpCounter = 0;
-        List<int> orderedPortList;
-        lock(_lock) {
-            orderedPortList = _members
+        
+        var orderedPortList = _members
                 .Where(kv => kv.Value.Connected)
                 .OrderBy(kv => kv.Value.MessageNumber)
                 .Select(kv => kv.Key)
                 .ToList();
-            _diskMap[id] = [];
-        }
 
-        foreach (var port in orderedPortList.TakeWhile(port => backUpCounter != backUp))
+        _diskMap.TryAdd(id, []);
+
+        foreach (var port in orderedPortList)
         {
-            if (backUpCounter == backUpNumber)
-            {
-                break;
-            }
-
-            
+            if (backUpCounter == backUpNumber) break;
             try
             {
-                _chatClients[port].SetMessage(new SetRequest
+                
+                await _chatClients[port].SetMessageAsync(new SetRequest
                 {
                     Id = id,
                     Text = text,
@@ -191,25 +195,33 @@ public class Leader(int backUp) : IServer
                     FromPort = Port,
                     Timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds()
                 });
-                lock(_lock) { _diskMap[id].Add(port); }
+
+                lock (_diskMap[id])
+                {
+                    _diskMap[id].Add(port);
+                }
+                    
                 ++backUpCounter;
                 _members[port].MessageNumber += 1;
             }
             catch (RpcException ex)
             {
                 Console.WriteLine($"RPC Exception: {ex}");
+                _diskMap.TryRemove(id, out _);
             }
         }
 
-        response = backUpCounter >= backUpNumber ? "OK" : "ERROR: Not enough backups";
-        await SendResponseAsync(stream, response +"\n");
+        if (backUpCounter >= backUpNumber)
+        {
+            await writer.WriteLineAsync("OK");
+        }
+        else
+        {
+            _diskMap.TryRemove(id, out _);
+            await writer.WriteLineAsync("ERROR: Not enough backups");
+        }
     }
 
-    private static async Task SendResponseAsync(NetworkStream stream, string message)
-    {
-        var responseBytes = Encoding.UTF8.GetBytes(message);
-        await stream.WriteAsync(responseBytes);
-    }
     private async Task CheckFamily()
     {
         using var timer = new PeriodicTimer(TimeSpan.FromSeconds(5));
@@ -227,44 +239,37 @@ public class Leader(int backUp) : IServer
             {
                 if (!_members.ContainsKey(port))
                 {
-                    lock(_lock)
-                    {
-                        if (!_members.ContainsKey(port))
-                            _members.Add(port, new MemberInfo(0, false));
-                    }
+                    _members.TryAdd(port, new MemberInfo(0, false));
                 }
                 try
                 {
-                    var channel = GrpcChannel.ForAddress($"http://localhost:{port}");
-                    if (!_familyClients.TryGetValue(port, out var familyClient))
+                    if (!_familyClients.ContainsKey(port))
                     {
-                        familyClient = new Family.FamilyClient(channel);
-                        _familyClients[port] = new Family.FamilyClient(channel);
-                        _chatClients[port] = new Chat.ChatClient(channel);
+                        var channel = GrpcChannel.ForAddress($"http://localhost:{port}");
+                        var newFamilyClient = new Family.FamilyClient(channel);
+                        var newChatClient = new Chat.ChatClient(channel);
+                        _familyClients.TryAdd(port, newFamilyClient);
+                        _chatClients.TryAdd(port, newChatClient);
                     }
                     
-
-                    
-
-                    var reply = await familyClient.FamilyCheckAsync(
-                        new FamilyRequest{Port = port},deadline: DateTime.UtcNow.AddSeconds(1));
-
-
-                    if (!reply.Active) continue;
-
-                    lock (_lock)
+                    if (_familyClients.TryGetValue(port, out var familyClient))
                     {
-                        _availablePorts.Add(port);
+                        var reply = await familyClient.FamilyCheckAsync(
+                            new FamilyRequest{Port = port},deadline: DateTime.UtcNow.AddSeconds(1));
                         
+                        if (reply.Active)
+                        {
+                            _availablePorts.TryAdd(port, 0);
+                        }
                     }
                 }
                 catch (RpcException)
                 {
-                    lock (_lock)
+                    if(AvailablePorts.Contains(port))
                     {
-                        _availablePorts.Remove(port);
+                        _availablePorts.TryRemove(port, out _);
+                        Console.WriteLine($"Port {port} removed (unreachable).");
                     }
-                    Console.WriteLine($"Port {port} removed (unreachable).");
                 
                 }
 
@@ -272,21 +277,25 @@ public class Leader(int backUp) : IServer
 
             foreach (var member in _members)
             {
-                member.Value.Connected = AvailablePorts.Contains(member.Key);
+                member.Value.Connected = _availablePorts.ContainsKey(member.Key);
             }
 
             
             
-            if (AvailablePorts.Count == 0)
+            if (_availablePorts.IsEmpty)
             {
                 Console.WriteLine("Empty");
                 continue;
             }
             
-            foreach (var port in AvailablePorts)
+            foreach (var port in _availablePorts.Keys)
             {
-                _members[port].Connected = true;
-                _familyClients[port].SendFamily(new FamilyMembers{Ports = { AvailablePorts }});
+                if (_members.TryGetValue(port, out var member)) member.Connected = true;
+                
+                if(_familyClients.TryGetValue(port, out var client))
+                {
+                     await client.SendFamilyAsync(new FamilyMembers{Ports = { _availablePorts.Keys }});
+                }
             }
             
             Console.WriteLine($"Message number: {_diskMap.Keys.Count}");
@@ -294,7 +303,7 @@ public class Leader(int backUp) : IServer
                          .Where(kv => kv.Value.Connected).ToList())
             {
                 var keyPort = connectedPorts.Key;
-                var messageNumber = _diskMap.Count(x => x.Value.Contains(keyPort));
+                var messageNumber = _diskMap.Values.Count(x => x.Contains(keyPort));
                 Console.WriteLine($"{keyPort} : saved {messageNumber } message");   
             }
             
@@ -315,10 +324,4 @@ public class MemberInfo(int number, bool connected)
 {
     public int MessageNumber = number;
     public bool Connected = connected;
-}
-
-public class TcpRequest(TcpClient client, string text)
-{
-    public TcpClient Client = client;
-    public string Text = text;
 }
