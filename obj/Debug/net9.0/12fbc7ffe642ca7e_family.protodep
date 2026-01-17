@@ -1,0 +1,3 @@
+obj\Debug\net9.0\Protos/Family.cs \
+obj\Debug\net9.0\Protos/FamilyGrpc.cs: C:/Users/burak/.nuget/packages/grpc.tools/2.64.0/build/native/include/google/protobuf/empty.proto\
+ Protos/family.proto

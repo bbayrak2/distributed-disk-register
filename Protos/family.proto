@@ -1,0 +1,23 @@
+﻿syntax = "proto3";
+import "google/protobuf/empty.proto";
+option csharp_namespace = "GrpcService";
+
+package family;
+
+service Family {
+  rpc FamilyCheck (FamilyRequest) returns (FamilyResponse);
+  rpc SendFamily (FamilyMembers) returns (google.protobuf.Empty);
+}
+
+message FamilyMembers{
+  repeated int32 ports = 1;
+}
+
+message FamilyRequest {
+  int32 port = 1;
+}
+
+message FamilyResponse {
+  int32 port = 1;
+  bool active = 2;
+}

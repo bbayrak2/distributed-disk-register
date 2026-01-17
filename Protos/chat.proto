@@ -1,0 +1,37 @@
+﻿syntax = "proto3";
+option csharp_namespace = "GrpcService";
+
+package chat;
+
+service Chat {
+  rpc SetMessage (SetRequest) returns (SetResponse);
+  rpc GetMessage (GetRequest) returns (GetResponse);
+}
+
+
+
+message SetRequest {
+  int32 id = 1;
+  string text = 2;
+  string fromHost = 3;
+  int32 fromPort = 4;
+  int64 timestamp = 5;
+}
+
+message SetResponse {
+  int32 id = 1;
+  string text = 2;
+  int32 port = 3;
+}
+
+message GetRequest {
+  int32 id = 1;
+  string fromHost = 3;
+  int32 fromPort = 4;
+  int64 timestamp = 5;
+}
+
+message GetResponse {
+  int32 id = 1;
+  string text = 2;
+}
